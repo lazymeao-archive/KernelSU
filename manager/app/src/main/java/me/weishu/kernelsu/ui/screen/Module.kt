@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
@@ -56,6 +57,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberTopAppBarState
@@ -92,6 +94,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.weishu.kernelsu.Natives
 import me.weishu.kernelsu.R
+import me.weishu.kernelsu.ksuApp
 import me.weishu.kernelsu.ui.component.ConfirmResult
 import me.weishu.kernelsu.ui.component.SearchAppBar
 import me.weishu.kernelsu.ui.component.rememberConfirmDialog
@@ -103,9 +106,9 @@ import me.weishu.kernelsu.ui.util.hasMagisk
 import me.weishu.kernelsu.ui.util.reboot
 import me.weishu.kernelsu.ui.util.toggleModule
 import me.weishu.kernelsu.ui.util.uninstallModule
+import me.weishu.kernelsu.ui.util.getFileName
 import me.weishu.kernelsu.ui.viewmodel.ModuleViewModel
 import me.weishu.kernelsu.ui.webui.WebUIActivity
-import okhttp3.OkHttpClient
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Destination<RootGraph>
@@ -200,6 +203,12 @@ fun ModuleScreen(navigator: DestinationsNavigator) {
         floatingActionButton = {
             if (!hideInstallButton) {
                 val moduleInstall = stringResource(id = R.string.module_install)
+                val confirmTitle = stringResource(R.string.module)
+                var zipUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+                val confirmDialog = rememberConfirmDialog(onConfirm = {
+                    navigator.navigate(FlashScreenDestination(FlashIt.FlashModules(zipUris)))
+                    viewModel.markNeedRefresh()
+                })
                 val selectZipLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.StartActivityForResult()
                 ) {
@@ -207,20 +216,38 @@ fun ModuleScreen(navigator: DestinationsNavigator) {
                         return@rememberLauncherForActivityResult
                     }
                     val data = it.data ?: return@rememberLauncherForActivityResult
-                    val uri = data.data ?: return@rememberLauncherForActivityResult
+                    val clipData = data.clipData
 
-                    navigator.navigate(FlashScreenDestination(FlashIt.FlashModule(uri)))
+                    val uris = mutableListOf<Uri>()
+                    if (clipData != null) {
+                        for (i in 0 until clipData.itemCount) {
+                            clipData.getItemAt(i)?.uri?.let { uris.add(it) }
+                        }
+                    } else {
+                        data.data?.let { uris.add(it) }
+                    }
 
-                    viewModel.markNeedRefresh()
-
-                    Log.i("ModuleScreen", "select zip result: ${it.data}")
+                    if (uris.size == 1) {
+                        navigator.navigate(FlashScreenDestination(FlashIt.FlashModules(listOf(uris.first()))))
+                    } else if (uris.size > 1)  {
+                        // multiple files selected
+                        val moduleNames = uris.mapIndexed { index, uri -> "\n${index + 1}. ${uri.getFileName(context)}" }.joinToString("")
+                        val confirmContent = context.getString(R.string.module_install_prompt_with_name, moduleNames)
+                        zipUris = uris
+                        confirmDialog.showConfirm(
+                            title = confirmTitle,
+                            content = confirmContent,
+                            markdown = true
+                        )
+                    }
                 }
 
                 ExtendedFloatingActionButton(
                     onClick = {
-                        // select the zip file to install
+                        // Select the zip files to install
                         val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
                             type = "application/zip"
+                            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
                         }
                         selectZipLauncher.launch(intent)
                     },
@@ -232,6 +259,7 @@ fun ModuleScreen(navigator: DestinationsNavigator) {
         contentWindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
         snackbarHost = { SnackbarHost(hostState = snackBarHost) }
     ) { innerPadding ->
+
         when {
             hasMagisk -> {
                 Box(
@@ -254,7 +282,7 @@ fun ModuleScreen(navigator: DestinationsNavigator) {
                     modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
                     boxModifier = Modifier.padding(innerPadding),
                     onInstallModule = {
-                        navigator.navigate(FlashScreenDestination(FlashIt.FlashModule(it)))
+                        navigator.navigate(FlashScreenDestination(FlashIt.FlashModules(listOf(it))))
                     },
                     onClickModule = { id, name, hasWebUi ->
                         if (hasWebUi) {
@@ -314,7 +342,7 @@ private fun ModuleList(
         val changelogResult = loadingDialog.withLoading {
             withContext(Dispatchers.IO) {
                 runCatching {
-                    OkHttpClient().newCall(
+                    ksuApp.okhttpClient.newCall(
                         okhttp3.Request.Builder().url(changelogUrl).build()
                     ).execute().body!!.string()
                 }
@@ -548,6 +576,7 @@ fun ModuleItem(
                     if (module.hasWebUi) {
                         toggleable(
                             value = module.enabled,
+                            enabled = !module.remove && module.enabled,
                             interactionSource = interactionSource,
                             role = Role.Button,
                             indication = indication,
@@ -637,6 +666,7 @@ fun ModuleItem(
                 if (module.hasActionScript) {
                     FilledTonalButton(
                         modifier = Modifier.defaultMinSize(52.dp, 32.dp),
+                        enabled = !module.remove && module.enabled,
                         onClick = {
                             navigator.navigate(ExecuteModuleActionScreenDestination(module.id))
                             viewModel.markNeedRefresh()
@@ -664,6 +694,7 @@ fun ModuleItem(
                 if (module.hasWebUi) {
                     FilledTonalButton(
                         modifier = Modifier.defaultMinSize(52.dp, 32.dp),
+                        enabled = !module.remove && module.enabled,
                         onClick = { onClick(module) },
                         interactionSource = interactionSource,
                         contentPadding = ButtonDefaults.TextButtonContentPadding
@@ -689,6 +720,7 @@ fun ModuleItem(
                 if (updateUrl.isNotEmpty()) {
                     Button(
                         modifier = Modifier.defaultMinSize(52.dp, 32.dp),
+                        enabled = !module.remove,
                         onClick = { onUpdate(module) },
                         shape = ButtonDefaults.textShape,
                         contentPadding = ButtonDefaults.TextButtonContentPadding
